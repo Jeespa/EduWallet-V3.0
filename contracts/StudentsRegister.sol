@@ -95,33 +95,30 @@ contract StudentsRegister is Ownable {
     }
 
     /**
-     * @notice Registers a new student in the system
-     * @param _student Address of the student to register
-     * @param _basicInfo Struct containing core biographical student information
+     * @notice Registers a new student in the system.
+     * @dev Personal data is no longer stored on-chain; only the DID hash is recorded.
+     * @param _student    EOA address of the student to register
+     * @param _didKeyHash keccak256 of the student's did:key string
      * @custom:throws AlreadyExistingStudent if student is already registered
      */
     function registerStudent(
         address _student,
-        Student.StudentBasicInfo calldata _basicInfo
+        bytes32 _didKeyHash
     ) external {
-        // Check if the caller is a verified university
         if (universitiesAccounts[_msgSender()] != true) {
             revert RestrictedFunction();
         }
-        // Check if student is not already registered
         if (students[_student] != address(0)) {
             revert AlreadyExistingStudent();
         }
 
-        // Deploy student account contract with university as initial writer
         address studentAddr = studentDeployer.deploy(
             _msgSender(),
             _student,
-            _basicInfo,
+            _didKeyHash,
             entryPoint
         );
 
-        // Store student's contract address
         students[_student] = studentAddr;
     }
 

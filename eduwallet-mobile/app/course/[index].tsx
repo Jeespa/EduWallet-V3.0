@@ -2,38 +2,46 @@
 import React from "react";
 import { View, Text, StyleSheet, ScrollView } from "react-native";
 import { useLocalSearchParams } from "expo-router";
-import { useStudent } from "../../context/StudentContext";
+import { useWallet } from "../../context/WalletContext";
+
+function b64urlToString(s: string): string {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = "=".repeat((4 - (b64.length % 4)) % 4);
+  return atob(b64 + padding);
+}
+
+function parseDisclosures(sdJwt: string): Record<string, string> {
+  const parts = sdJwt.split("~").slice(1).filter(Boolean);
+  const result: Record<string, string> = {};
+  for (const part of parts) {
+    try {
+      const decoded = JSON.parse(b64urlToString(part)) as unknown[];
+      if (Array.isArray(decoded) && decoded.length === 3) {
+        result[String(decoded[1])] = String(decoded[2]);
+      }
+    } catch {
+      // skip malformed
+    }
+  }
+  return result;
+}
 
 /**
- * Detail screen for a single course.
+ * Detail screen for a single academic result VC.
  *
- * The route is `/course/[index]`, where `index` is the 0-based index
- * into `student.results` from the login payload. The screen reads the
- * index from the URL, looks up the corresponding result in the
- * StudentContext, and renders a read-only view.
+ * The route is `/course/[index]` where `index` is the 0-based position
+ * in the `academicVcs` array from WalletContext.
  */
 export default function CourseDetailsScreen() {
   const { index } = useLocalSearchParams<{ index?: string }>();
-  const { data } = useStudent();
+  const { academicVcs } = useWallet();
 
-  // No student data at all – show a simple error message
-  if (!data || !data.student || !data.student.results) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.errorText}>No student data available.</Text>
-      </View>
-    );
-  }
-
-  // Parse the dynamic route segment `[index]` into a number
   const courseIndex = index ? parseInt(index, 10) : NaN;
-  const results = data.student.results;
 
-  // Guard against malformed or out-of-range indices
   if (
     Number.isNaN(courseIndex) ||
     courseIndex < 0 ||
-    courseIndex >= results.length
+    courseIndex >= academicVcs.length
   ) {
     return (
       <View style={styles.container}>
@@ -42,48 +50,51 @@ export default function CourseDetailsScreen() {
     );
   }
 
-  const course = results[courseIndex];
-
-  // Only show grade / evaluation date if we actually have non-empty values
-  const hasGrade =
-    typeof course.grade === "string" && course.grade.trim().length > 0;
-  const hasEvaluationDate =
-    typeof course.evaluationDate === "string" &&
-    course.evaluationDate.trim().length > 0;
+  const vc = academicVcs[courseIndex]!;
+  const claims = parseDisclosures(vc);
 
   return (
     <ScrollView style={styles.container}>
-      <Text style={styles.title}>{course.name}</Text>
-      <Text style={styles.subtitle}>
-        {course.degreeCourse} • {course.university.shortName}
-      </Text>
+      <Text style={styles.title}>{claims.courseName ?? "Unknown Course"}</Text>
+      {claims.degreeProgramme ? (
+        <Text style={styles.subtitle}>{claims.degreeProgramme}</Text>
+      ) : null}
 
       <View style={styles.card}>
-        <Text style={styles.label}>Course code</Text>
-        <Text style={styles.value}>{course.code}</Text>
+        {claims.courseCode ? (
+          <>
+            <Text style={styles.label}>Course code</Text>
+            <Text style={styles.value}>{claims.courseCode}</Text>
+          </>
+        ) : null}
 
-        <Text style={styles.label}>ECTS</Text>
-        <Text style={styles.value}>{course.ects.toFixed(1)}</Text>
+        {claims.ects ? (
+          <>
+            <Text style={styles.label}>ECTS</Text>
+            <Text style={styles.value}>{claims.ects}</Text>
+          </>
+        ) : null}
 
-        {hasGrade && (
+        {claims.grade ? (
           <>
             <Text style={styles.label}>Grade</Text>
-            <Text style={styles.value}>{course.grade}</Text>
+            <Text style={styles.value}>{claims.grade}</Text>
           </>
-        )}
+        ) : null}
 
-        {hasEvaluationDate && (
+        {claims.date ? (
           <>
-            <Text style={styles.label}>Evaluation date</Text>
-            <Text style={styles.value}>{course.evaluationDate}</Text>
+            <Text style={styles.label}>Date</Text>
+            <Text style={styles.value}>{claims.date}</Text>
           </>
-        )}
+        ) : null}
 
-        <Text style={styles.label}>University</Text>
-        <Text style={styles.value}>{course.university.name}</Text>
-
-        <Text style={styles.label}>Country</Text>
-        <Text style={styles.value}>{course.university.country}</Text>
+        {claims.universityName ? (
+          <>
+            <Text style={styles.label}>University</Text>
+            <Text style={styles.value}>{claims.universityName}</Text>
+          </>
+        ) : null}
       </View>
     </ScrollView>
   );

@@ -6,6 +6,7 @@ import { StudentDeployer__factory } from '@typechain/factories/contracts/Student
 import { UniversityDeployer__factory } from '@typechain/factories/contracts/UniversityDeployer__factory';
 import { EntryPoint__factory } from '@typechain/factories/@account-abstraction/contracts/core/EntryPoint__factory';
 import { Paymaster__factory } from '@typechain/factories/contracts/Paymaster__factory';
+import { VCStatusRegistry__factory } from '@typechain/factories/contracts/VCStatusRegistry__factory';
 import type { EntryPoint } from '@typechain/@account-abstraction/contracts/core/EntryPoint';
 import * as eduwallet from 'eduwallet-sdk';
 import * as dotenv from 'dotenv';
@@ -97,6 +98,23 @@ export async function deployStudentsRegister(): Promise<void> {
 
         // Store reference to register for subsequent operations
         studentsRegister = register;
+
+        // Deploy VCStatusRegistry
+        const vcRegistryFactory = new VCStatusRegistry__factory(managedDeployer);
+        const vcRegistry = await vcRegistryFactory.deploy();
+        await vcRegistry.waitForDeployment();
+        const vcRegistryAddress = await vcRegistry.getAddress();
+        const studentDeployerAddress = await studentDeployer.getAddress();
+
+        console.log(`\n---------------------------------------------------`);
+        console.log(`VC STATUS REGISTRY:`);
+        console.log(`Address: ${vcRegistryAddress}`);
+        console.log(`\nSTUDENT DEPLOYER:`);
+        console.log(`Address: ${studentDeployerAddress}`);
+        console.log(`\nAdd to gateway/.env:`);
+        console.log(`VC_STATUS_REGISTRY_ADDRESS=${vcRegistryAddress}`);
+        console.log(`STUDENT_DEPLOYER_ADDRESS=${studentDeployerAddress}`);
+        console.log(`---------------------------------------------------\n`);
     } catch (error) {
         throw new Error(`Deployment failed: ${error}`);
     }
@@ -297,39 +315,37 @@ export async function subscribeUniversity(name: string, country: string, shortNa
             universityTx.wait(),
             fundTx.wait()
         ]);
+
+        // Retrieve the university SCA address for gateway configuration
+        const uniSca = await studentsRegister.connect(uni).getUniversityAccount();
+        console.log(`\n---------------------------------------------------`);
+        console.log(`UNIVERSITY SCA:`);
+        console.log(`Private key (EOA): ${uni.privateKey}`);
+        console.log(`SCA address:       ${uniSca}`);
+        console.log(`\nAdd to gateway/.env:`);
+        console.log(`GATEWAY_UNIVERSITY_PRIVATE_KEY=${uni.privateKey}`);
+        console.log(`GATEWAY_UNIVERSITY_SCA=${uniSca}`);
+        console.log(`---------------------------------------------------\n`);
     } catch (error) {
         throw new Error(`${error}`);
     }
 }
 
 /**
- * Registers a new student in the academic blockchain system.
- * Creates both a student Ethereum wallet and academic record.
- * Also funds the student's Ethereum wallet with initial ETH.
- * @author Diego Da Giau
- * @param {string} name - The student's first name
- * @param {string} surname - The student's last name
- * @param {string} birthDate - The student's date of birth in YYYY-MM-DD format
- * @param {string} birthPlace - The student's place of birth
- * @param {string} country - The student's country of birth
+ * Registers a new student in the academic blockchain system (EduWallet V3.0).
+ *
+ * Personal data is no longer stored on-chain. The SDK derives the student's
+ * did:key from their newly-created EOA and stores only the keccak256 hash.
+ *
  * @returns {Promise<void>} Promise that resolves when the student is successfully registered
- * @throws {Error} If no university wallet is available for registration or if any part of the registration process fails, with the error message from the underlying error
+ * @throws {Error} If no university wallet is available or registration fails
  */
-export async function registerStudent(name: string, surname: string, birthDate: string, birthPlace: string, country: string): Promise<void> {
+export async function registerStudent(): Promise<void> {
     if (!uni) {
         throw new Error("University not present")
     }
     try {
-        // Register the student using the SDK
-        const student = await eduwallet.registerStudent(
-            uni,
-            {
-                name,
-                surname,
-                birthDate,
-                birthPlace,
-                country,
-            });
+        const student = await eduwallet.registerStudent(uni);
 
         // Fund student's ETH wallet
         const studentEthWallet = await getStudentWallet(student.id, student.password);
@@ -341,12 +357,12 @@ export async function registerStudent(name: string, surname: string, birthDate: 
 
         await fundTx.wait();
 
-        // Display student credentials
         console.log(`\n---------------------------------------------------`);
         console.log(`STUDENT:`);
         console.log(`Wallet address: ${student.academicWalletAddress}`);
         console.log(`Id: ${student.id}`);
         console.log(`Password: ${student.password}`);
+        console.log(`(Personal data is held in the student's KYC VC, not on-chain)`);
         console.log(`---------------------------------------------------\n`);
     } catch (error) {
         throw new Error(`${error}`);
@@ -401,12 +417,13 @@ function derivePrivateKey(password: string, studentId: string): string {
 }
 
 /**
- * Retrieves basic student information from the blockchain.
- * Only fetches personal data without academic results.
- * @author Diego Da Giau
+ * Retrieves student on-chain identity data (EduWallet V3.0).
+ *
+ * Personal data is no longer on-chain — it lives in the student's KYC SD-JWT VC.
+ * This function shows the DID hash and prompts the caller to check academic results
+ * via getStudentInfoResults.
+ *
  * @param {string} studentWallet - The student's academic wallet address
- * @returns {Promise<void>} Promise that resolves when student information is successfully retrieved
- * @throws {Error} If no university wallet is available for retrieval or if the retrieval process fails, with the error message from the underlying error
  */
 export async function getStudentInfo(studentWallet: string): Promise<void> {
     if (!uni) {
@@ -414,17 +431,12 @@ export async function getStudentInfo(studentWallet: string): Promise<void> {
     }
 
     try {
-        // Retrieve student information using the SDK
-        const studentNew = await eduwallet.getStudentInfo(uni, studentWallet);
+        const studentData = await eduwallet.getStudentInfo(uni, studentWallet);
 
-        // Display student information
         console.log(`---------------------------------------------------`);
-        console.log(`STUDENT:`);
-        console.log(`Name: ${studentNew.name}`);
-        console.log(`Surname: ${studentNew.surname}`);
-        console.log(`Birth date: ${studentNew.birthDate}`);
-        console.log(`Birth place: ${studentNew.birthPlace}`);
-        console.log(`Country: ${studentNew.country}`);
+        console.log(`STUDENT (on-chain identity):`);
+        console.log(`DID key hash: ${studentData.didKeyHash}`);
+        console.log(`(Personal data is held in the student's KYC VC — not on-chain)`);
         console.log(`---------------------------------------------------`);
     } catch (error) {
         throw new Error(`${error}`);
@@ -448,14 +460,11 @@ export async function getStudentInfoResults(studentWallet: string): Promise<void
         // Retrieve complete student information with results using the SDK
         const studentComplete = await eduwallet.getStudentWithResult(uni, studentWallet);
 
-        // Display comprehensive student information and results
+        // Display academic results (personal data is in the student's KYC VC)
         console.log(`\n---------------------------------------------------`);
-        console.log(`STUDENT:`);
-        console.log(`Name: ${studentComplete.name}`);
-        console.log(`Surname: ${studentComplete.surname}`);
-        console.log(`Birth date: ${studentComplete.birthDate}`);
-        console.log(`Birth place: ${studentComplete.birthPlace}`);
-        console.log(`Country: ${studentComplete.country}`);
+        console.log(`STUDENT (academic record):`);
+        console.log(`DID key hash: ${studentComplete.didKeyHash}`);
+        console.log(`(Personal data held in student's KYC VC — not on-chain)`);
         console.log(`Results:`);
 
         // Iterate through and display each academic result

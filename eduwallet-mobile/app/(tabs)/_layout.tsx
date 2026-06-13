@@ -2,19 +2,18 @@
 import React from "react";
 import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { useStudent } from "../../context/StudentContext";
+import { useWallet } from "../../context/WalletContext";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 /**
  * Root tab layout for the mobile app.
  *
- * - Shows two tabs: "Wallet" and "Permissions"
- * - Hides the tab bar completely when the user is not logged in
- * - Adds safe area padding at the bottom on devices with a gesture bar
+ * Tab bar is shown whenever a wallet exists.
+ * Adds safe area padding at the bottom on devices with a gesture bar.
  */
 export default function TabLayout() {
-  const { id, sca, data } = useStudent();
-  const isLoggedIn = !!id && !!sca && !!data;
+  const { hasWallet } = useWallet();
+  const isLoggedIn = hasWallet;
 
   const insets = useSafeAreaInsets();
 
@@ -57,6 +56,16 @@ export default function TabLayout() {
           title: "Permissions",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="lock-closed-outline" size={size} color={color} />
+          ),
+        }}
+      />
+
+      <Tabs.Screen
+        name="credentials"
+        options={{
+          title: "Credentials",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="id-card-outline" size={size} color={color} />
           ),
         }}
       />

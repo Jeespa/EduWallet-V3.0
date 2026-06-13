@@ -31,4 +31,15 @@ export const STUDENTS_REGISTER_ABI = [
     stateMutability: "view",
     type: "function",
   },
+  // called by the university SCA to register a new student
+  {
+    inputs: [
+      { internalType: "address", name: "_student", type: "address" },
+      { internalType: "bytes32", name: "_didKeyHash", type: "bytes32" },
+    ],
+    name: "registerStudent",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
 ] as const;

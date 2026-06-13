@@ -9,11 +9,22 @@
 
 import express from "express";
 import cors from "cors";
-import { EduWalletClient, InvalidCredentialsError } from "./eduwalletClient";
-
-// shared types
-import type { CredentialsResponse } from "./types";
-import { GATEWAY_PORT } from "./config";
+import { ethers, JsonRpcProvider, Wallet, id } from "ethers";
+import { EduWalletClient } from "./eduwalletClient";
+import {
+  GATEWAY_PORT,
+  GATEWAY_DID_PRIVATE_KEY,
+  GATEWAY_URL,
+  GATEWAY_UNIVERSITY_PRIVATE_KEY,
+  RPC_URL,
+} from "./config";
+import { buildDidDocument } from "./did/didDocument";
+import { kycRouter } from "./routes/kyc";
+import { vcRouter } from "./routes/vc";
+import { studentRouter } from "./routes/student";
+import { academicRouter } from "./routes/academic";
+import { authRouter, verifyAndConsumeChallenge } from "./routes/auth";
+import { AccountAbstraction, PackedUserOpJson } from "./AccountAbstraction";
 
 const app = express();
 const PORT = GATEWAY_PORT || 3000;
@@ -28,6 +39,46 @@ app.use(express.json());
  */
 const client = new EduWalletClient();
 
+const provider = new JsonRpcProvider(RPC_URL);
+
+// Role identifiers mirroring the Student contract.
+const permRoleCodes = {
+  read: id("READER_ROLE"),
+  write: id("WRITER_ROLE"),
+};
+
+const STUDENT_PERM_ABI = [
+  "function revokePermission(address university)",
+  "function grantPermission(bytes32 permissionType, address university)",
+];
+
+/**
+ * Encodes the calldata for a grant or revoke permission call on Student.sol.
+ */
+function buildPermCallData(
+  action: "grant" | "revoke",
+  universityAddress: string,
+  permissionType?: "read" | "write"
+): string {
+  const iface = new ethers.Interface(STUDENT_PERM_ABI);
+  if (action === "revoke") {
+    return iface.encodeFunctionData("revokePermission", [universityAddress]);
+  }
+  const role =
+    permissionType === "write" ? permRoleCodes.write : permRoleCodes.read;
+  return iface.encodeFunctionData("grantPermission", [role, universityAddress]);
+}
+
+/**
+ * Returns an AccountAbstraction instance backed by the gateway's own keypair.
+ * The gateway pays outer-transaction gas; UserOp gas is covered by the Paymaster.
+ */
+function gatewayAa(): AccountAbstraction {
+  const key = GATEWAY_UNIVERSITY_PRIVATE_KEY || GATEWAY_DID_PRIVATE_KEY;
+  const wallet = new Wallet(key, provider);
+  return new AccountAbstraction(provider, wallet);
+}
+
 /**
  * Simple health check endpoint for monitoring and local debugging.
  * Returns a JSON object with a status field and a service identifier.
@@ -36,172 +87,166 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "eduwallet-gateway" });
 });
 
-// ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
+app.use("/kyc", kycRouter);
+
+app.use("/vc", vcRouter);
+app.use("/vc", studentRouter);
+app.use("/vc", academicRouter);
 
 /**
- * POST /auth/login
+ * GET /.well-known/did.json
  *
- * Authenticates a student by ID and password, reconstructs their smart account,
- * and returns a `CredentialsResponse` payload. On success, it also tries to
- * attach a full multi university permissions snapshot as `allPermissions`.
- *
- * Request body:
- *   {
- *     "id": "student-id",
- *     "password": "secret"
- *   }
- *
- * Response body on success:
- *   CredentialsResponse (+ optional allPermissions)
+ * Serves the gateway's W3C DID document for the did:web method.
+ * Resolvers fetch this URL to obtain the gateway's public verification key,
+ * which holders use to verify KYC credential signatures.
  */
-app.post("/auth/login", async (req, res) => {
+app.get("/.well-known/did.json", (_req, res) => {
+  const doc = buildDidDocument(GATEWAY_DID_PRIVATE_KEY, GATEWAY_URL);
+  res.json(doc);
+});
+
+app.use("/auth", authRouter);
+
+/**
+ * GET /students/:studentSca/permissions
+ *
+ * Read-only permission view backed by on-chain view functions.                                              
+ * No credentials required. 
+ */
+app.get("/students/:studentSca/permissions", async (req, res) => {
   try {
-    const { id, password } = req.body || {};
-
-    if (!id || !password) {
-      return res.status(400).json({ error: "Missing id or password" });
+    const { studentSca } = req.params;
+    if (!studentSca) {
+      return res.status(400).json({ error: "studentSca is required" });
     }
-
-    // First: normal student login
-    const payload: CredentialsResponse = await client.loginStudent(
-      id,
-      password
-    );
-
-    // Attach all permissions for this student once at login time.
-    // Clients may still refresh this later via /students/:sca/permissions.
-    try {
-      const allPermissions = await client.getAllPermissionsAsStudent(
-        id,
-        password,
-        payload.studentSca
-      );
-      (payload as any).allPermissions = allPermissions;
-    } catch (permErr) {
-      console.error("Failed to load all permissions at login:", permErr);
-      // The permissions snapshot is optional. The core login response is still valid.
-    }
-
+    const payload = await client.getAllPermissionsReadOnly(studentSca);
     res.json(payload);
   } catch (err: any) {
-    console.error("Error in /auth/login:", err);
-
-    if (err instanceof InvalidCredentialsError) {
-      return res.status(401).json({
-        error: "Invalid ID or password, or student is not registered",
-      });
-    }
-
-    // Hide internal details from clients; keep them in logs only.
-    return res.status(500).json({
-      error: "Login failed due to an internal error. Please try again later.",
+    console.error("Failed to get read-only permissions", err);
+    res.status(500).json({
+      error: err?.message || "Failed to get permission information",
     });
   }
 });
 
-// ---------------------------------------------------------------------------
-// Permissions: multi university view and student actions
-// ---------------------------------------------------------------------------
-
 /**
- * POST /students/:studentSca/permissions
+ * POST /students/:studentSca/permissions/prepare
  *
- * Returns a full multi university permissions view for a given student.
- * The gateway reconstructs the student wallet from the provided credentials
- * and queries all role based permission lists via the student smart account.
- *
- * Request params:
- *   :studentSca  Student smart account address
+ * Builds an unsigned packed UserOperation for a grant or revoke action and
+ * returns it alongside the EIP-712 signing parameters. The mobile app signs
+ * the packed op client-side and sends the result to /grant or /revoke.
  *
  * Request body:
  *   {
- *     "id": "student-id",
- *     "password": "secret"
+ *     "action": "grant" | "revoke",
+ *     "universityAddress": "0x...",
+ *     "type": "read" | "write"   // required when action = "grant"
  *   }
  *
  * Response body on success:
- *   AllPermissionsForStudent
+ *   { "packedUserOp": { ... }, "eip712": { "domain": { ... }, "types": { ... } } }
  */
-app.post("/students/:studentSca/permissions", async (req, res) => {
+app.post("/students/:studentSca/permissions/prepare", async (req, res) => {
   try {
     const { studentSca } = req.params;
-    const { id, password } = (req.body || {}) as {
-      id?: string;
-      password?: string;
+    const { action, universityAddress, type } = req.body as {
+      action?: string;
+      universityAddress?: string;
+      type?: string;
     };
 
     if (!studentSca) {
       return res.status(400).json({ error: "studentSca is required" });
     }
-    if (!id || !password) {
-      return res.status(400).json({ error: "id and password are required" });
+    if (action !== "grant" && action !== "revoke") {
+      return res
+        .status(400)
+        .json({ error: "action must be 'grant' or 'revoke'" });
+    }
+    if (!universityAddress || !universityAddress.startsWith("0x")) {
+      return res
+        .status(400)
+        .json({ error: "universityAddress is required" });
+    }
+    if (action === "grant" && type !== "read" && type !== "write") {
+      return res
+        .status(400)
+        .json({ error: "type must be 'read' or 'write' for grant" });
     }
 
-    const payload = await client.getAllPermissionsAsStudent(
-      id,
-      password,
-      studentSca
+    const callData = buildPermCallData(
+      action,
+      universityAddress,
+      type as "read" | "write" | undefined
     );
-
-    res.json(payload);
-  } catch (err: any) {
-    console.error("Failed to get ALL permissions", err);
-    res.status(500).json({
-      error: err?.message || "Failed to get complete permission information",
+    const aa = gatewayAa();
+    const packedUserOp = await aa.buildForClientSigning({
+      sender: studentSca,
+      target: studentSca,
+      value: 0n,
+      data: callData,
     });
+    const eip712 = aa.getEip712Params();
+
+    res.json({ packedUserOp, eip712 });
+  } catch (err: any) {
+    console.error("Failed to prepare permission op", err);
+    res
+      .status(500)
+      .json({ error: err?.message || "Failed to prepare operation" });
   }
 });
 
 /**
  * POST /students/:studentSca/permissions/revoke
  *
- * Revokes a specific university's permission on the student smart account.
- * The gateway acts as the student by reconstructing the owner wallet from
- * ID and password and then submitting an account abstraction user operation.
- *
- * Request params:
- *   :studentSca  Student smart account address
+ * Submits a student-signed UserOperation that revokes a university's permission.
+ * The student authenticates via challenge-response and provides a pre-signed
+ * packed UserOperation obtained from /permissions/prepare.
  *
  * Request body:
  *   {
- *     "id": "student-id",
- *     "password": "secret",
- *     "universityAddress": "0x..."
+ *     "did": "did:key:z6Mk...",
+ *     "challenge": "<uuid from GET /auth/challenge>",
+ *     "challengeSignature": "0x...",
+ *     "signedUserOp": { ...packedUserOp..., "signature": "0x..." }
  *   }
  *
  * Response body on success:
  *   { "status": "ok" }
- *
- * Frontends are expected to refresh the full permissions list afterwards.
  */
 app.post("/students/:studentSca/permissions/revoke", async (req, res) => {
   try {
     const { studentSca } = req.params;
-    const { id, password, universityAddress } = req.body as {
-      id?: string;
-      password?: string;
-      universityAddress?: string;
+    const { did, challenge, challengeSignature, signedUserOp } = req.body as {
+      did?: string;
+      challenge?: string;
+      challengeSignature?: string;
+      signedUserOp?: PackedUserOpJson & { signature: string };
     };
 
-    if (!studentSca) {
-      return res.status(400).json({ error: "studentSca is required" });
+    if (!did || !challenge || !challengeSignature || !signedUserOp) {
+      return res.status(400).json({
+        error: "did, challenge, challengeSignature, and signedUserOp are required",
+      });
     }
-    if (!id || !password) {
+
+    if (!verifyAndConsumeChallenge(challenge, did, challengeSignature)) {
+      return res.status(401).json({ error: "Invalid or expired challenge" });
+    }
+
+    if (signedUserOp.sender.toLowerCase() !== studentSca.toLowerCase()) {
       return res
         .status(400)
-        .json({ error: "id and password are required to revoke permission" });
+        .json({ error: "signedUserOp.sender does not match studentSca" });
     }
 
-    await client.revokePermissionAsStudent(
-      id,
-      password,
-      studentSca,
-      universityAddress
-    );
+    const aa = gatewayAa();
+    const tx = await aa.submitSignedPacked([
+      signedUserOp as Required<PackedUserOpJson>,
+    ]);
+    await tx.wait();
 
-    // Frontends re-fetch permissions via /students/:sca/permissions, so we just acknowledge.
     res.json({ status: "ok" });
   } catch (err: any) {
     console.error("Failed to revoke permission", err);
@@ -214,60 +259,44 @@ app.post("/students/:studentSca/permissions/revoke", async (req, res) => {
 /**
  * POST /students/:studentSca/permissions/grant
  *
- * Accepts a pending permission request or grants a new permission
- * for a university on the student smart account. The gateway acts
- * as the student and submits a `grantPermission` call via account abstraction.
- *
- * Request params:
- *   :studentSca  Student smart account address
- *
- * Request body:
- *   {
- *     "id": "student-id",
- *     "password": "secret",
- *     "type": "read" | "write",
- *     "universityAddress": "0x..."
- *   }
+ * Submits a student-signed UserOperation that grants a university permission.
+ * Same auth and body shape as /revoke.
  *
  * Response body on success:
  *   { "status": "ok" }
- *
- * Frontends are expected to refresh the full permissions list afterwards.
  */
 app.post("/students/:studentSca/permissions/grant", async (req, res) => {
   try {
     const { studentSca } = req.params;
-    const { id, password, type, universityAddress } = req.body as {
-      id?: string;
-      password?: string;
-      type?: "read" | "write";
-      universityAddress?: string;
+    const { did, challenge, challengeSignature, signedUserOp } = req.body as {
+      did?: string;
+      challenge?: string;
+      challengeSignature?: string;
+      signedUserOp?: PackedUserOpJson & { signature: string };
     };
 
-    if (!studentSca) {
-      return res.status(400).json({ error: "studentSca is required" });
+    if (!did || !challenge || !challengeSignature || !signedUserOp) {
+      return res.status(400).json({
+        error: "did, challenge, challengeSignature, and signedUserOp are required",
+      });
     }
-    if (!id || !password) {
+
+    if (!verifyAndConsumeChallenge(challenge, did, challengeSignature)) {
+      return res.status(401).json({ error: "Invalid or expired challenge" });
+    }
+
+    if (signedUserOp.sender.toLowerCase() !== studentSca.toLowerCase()) {
       return res
         .status(400)
-        .json({ error: "id and password are required to grant permission" });
+        .json({ error: "signedUserOp.sender does not match studentSca" });
     }
 
-    if (type !== "read" && type !== "write") {
-      return res
-        .status(400)
-        .json({ error: "type must be 'read' or 'write'" });
-    }
+    const aa = gatewayAa();
+    const tx = await aa.submitSignedPacked([
+      signedUserOp as Required<PackedUserOpJson>,
+    ]);
+    await tx.wait();
 
-    await client.grantPermissionAsStudent(
-      id,
-      password,
-      studentSca,
-      type,
-      universityAddress
-    );
-
-    // Frontends re-fetch permissions via /students/:sca/permissions, so we just acknowledge.
     res.json({ status: "ok" });
   } catch (err: any) {
     console.error("Failed to grant permission", err);

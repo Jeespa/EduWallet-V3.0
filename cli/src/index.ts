@@ -261,56 +261,23 @@ async function registerUniversityCommand(): Promise<void> {
 }
 
 /**
- * Prompts for student details and registers a new student in the system.
- * Collects and validates personal information required for academic records.
- * @author Diego Da Giau
- * @returns {Promise<void>} Promise that resolves when the student is successfully registered
+ * Registers a new student in the system (EduWallet V3.0).
+ *
+ * No personal data is collected — the SDK creates a wallet and derives the
+ * student's did:key hash automatically. Personal data is captured later via
+ * the BankID KYC flow on the student's mobile device.
  */
 async function registerStudentCommand(): Promise<void> {
     try {
-        const answers = await inquirer.prompt([
-            {
-                type: 'input',
-                name: 'name',
-                message: "Enter the student's first name:",
-                validate: validateString,
-            },
-            {
-                type: 'input',
-                name: 'surname',
-                message: "Enter student's second name:",
-                validate: validateString,
-            },
-            {
-                type: 'input',
-                name: 'birthDate',
-                message: "Enter the student's date of birth (YYYY-MM-DD):",
-                validate: validateDate,
-            },
-            {
-                type: 'input',
-                name: 'birthPlace',
-                message: "Enter the student's place of birth:",
-                validate: validateString,
-            },
-            {
-                type: 'input',
-                name: 'country',
-                message: "Enter the student's country of birth:",
-                validate: validateString,
-            },
-        ]);
-
         const spinner = ora('Registering the student...').start();
         try {
-            await registerStudent(answers.name, answers.surname, answers.birthDate, answers.birthPlace, answers.country);
-            spinner.succeed('Student registered successfully!');
+            await registerStudent();
+            spinner.succeed('Student registered successfully! (Personal data will be captured via KYC on the mobile app)');
         } catch (error) {
             spinner.fail(`Failed to register the student. Try again.`);
-            //console.error('Student registration error details:', error);
         }
     } catch (error) {
-        console.error('Failed to collect student information:', error);
+        console.error('Failed to register student:', error);
     }
 }
 
@@ -324,12 +291,12 @@ async function getStudentInfoCommand(): Promise<void> {
     try {
         const address = await getStudentAddress();
 
-        const spinner = ora("Retrieving the student's personal details...").start();
+        const spinner = ora("Retrieving the student's on-chain identity data...").start();
         try {
             await getStudentInfo(address);
-            spinner.succeed("Student's personal details retrieved successfully");
+            spinner.succeed("Student's on-chain identity data retrieved successfully");
         } catch (error) {
-            spinner.fail(`Failed to retrieve the student's personal details. Check the address.`);
+            spinner.fail(`Failed to retrieve the student's on-chain identity data. Check the address.`);
             //console.error('Student info retrieval error details:', error);
         }
     } catch (error) {
@@ -629,6 +596,203 @@ async function verifyPermissionCommand(): Promise<void> {
  * @author Diego Da Giau
  * @returns {Promise<void>} Promise that resolves when the university wallet is successfully changed
  */
+/**
+ * Issues an AcademicResult SD-JWT VC via the gateway.
+ *
+ * Calls POST /vc/academic-result on the gateway, authenticated as the active
+ * university EOA. The gateway issues the VC and stores it for the student to
+ * retrieve via GET /vc/academic-results/:studentDid (the mobile app "Refresh"
+ * button). The on-chain enroll + evaluate are handled server-side.
+ */
+async function issueAcademicResultVcCommand(): Promise<void> {
+    if (!uni) {
+        console.log('No university wallet loaded. Subscribe a university first.');
+        return;
+    }
+
+    let studentDid: string;
+    let studentSca: string;
+    let courseCode: string;
+    let courseName: string;
+    let grade: string;
+    let ects: string;
+    let date: string;
+    let degreeProgramme: string;
+
+    try {
+        const answers = await inquirer.prompt([
+            {
+                type: 'input',
+                name: 'studentDid',
+                message: "Enter student's did:key (did:key:z...):",
+                validate: (v: string) => v.startsWith('did:key:z') || 'Must start with did:key:z',
+            },
+            {
+                type: 'input',
+                name: 'studentSca',
+                message: "Enter student's SCA address (0x...):",
+                validate: validateAddress,
+            },
+            {
+                type: 'input',
+                name: 'courseCode',
+                message: 'Enter course code (e.g. TMA4100):',
+                validate: validateString,
+            },
+            {
+                type: 'input',
+                name: 'courseName',
+                message: 'Enter course name:',
+                validate: validateLongString,
+            },
+            {
+                type: 'input',
+                name: 'grade',
+                message: 'Enter grade (e.g. B):',
+                validate: validateGrade,
+            },
+            {
+                type: 'input',
+                name: 'ects',
+                message: 'Enter ECTS credits:',
+                validate: validateEcts,
+            },
+            {
+                type: 'input',
+                name: 'date',
+                message: 'Enter evaluation date (YYYY-MM-DD):',
+                validate: validateDate,
+            },
+            {
+                type: 'input',
+                name: 'degreeProgramme',
+                message: 'Enter degree programme (e.g. Master in Computer Engineering):',
+                validate: validateLongString,
+            },
+        ]);
+
+        studentDid = answers.studentDid as string;
+        studentSca = answers.studentSca as string;
+        courseCode = answers.courseCode as string;
+        courseName = answers.courseName as string;
+        grade = answers.grade as string;
+        ects = answers.ects as string;
+        date = answers.date as string;
+        degreeProgramme = answers.degreeProgramme as string;
+    } catch (error) {
+        console.error('Failed to collect academic result information:', error);
+        return;
+    }
+
+    const spinner = ora('Issuing Academic Result VC via gateway...').start();
+    try {
+        const gatewayUrl = process.env.GATEWAY_URL || 'http://localhost:3000';
+        const bearerToken = uni.address;
+
+        const response = await fetch(`${gatewayUrl}/vc/academic-result`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${bearerToken}`,
+            },
+            body: JSON.stringify({
+                studentDid,
+                studentSca,
+                courseCode,
+                courseName,
+                grade,
+                ects,
+                date,
+                degreeProgramme,
+            }),
+        });
+
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({})) as { error?: string };
+            throw new Error(body.error ?? `Gateway returned ${response.status}`);
+        }
+
+        const result = await response.json() as { academicResultVc: string; credentialId: string };
+        spinner.succeed('Academic Result VC issued successfully!');
+        console.log(`\nCredential ID: ${result.credentialId}`);
+        console.log(`\nThe student can fetch this VC in the mobile app via the "Refresh" button on the Credentials tab.`);
+        console.log(`\nSD-JWT (first 80 chars): ${result.academicResultVc.slice(0, 80)}...`);
+    } catch (error) {
+        spinner.fail(`Failed to issue Academic Result VC: ${error instanceof Error ? error.message : error}`);
+    }
+}
+
+/**
+ * Prompts for an SD-JWT string and calls POST /vc/verify on the gateway.
+ * Displays the verification result including issuer, claims, and revocation status.
+ */
+async function verifyVcCommand(): Promise<void> {
+    let sdJwt: string;
+    try {
+        const answers = await inquirer.prompt([
+            {
+                type: 'input',
+                name: 'sdJwt',
+                message: 'Paste the SD-JWT credential to verify:',
+                validate: (v: string) => v.trim().length > 0 || 'SD-JWT cannot be empty',
+            },
+        ]);
+        sdJwt = (answers.sdJwt as string).trim();
+    } catch {
+        console.error('Prompt cancelled');
+        return;
+    }
+
+    const spinner = ora('Verifying credential...').start();
+    try {
+        const gatewayUrl = process.env.GATEWAY_URL || 'http://localhost:3000';
+        const response = await fetch(`${gatewayUrl}/vc/verify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sdJwtPresentation: sdJwt }),
+        });
+
+        const result = await response.json() as {
+            valid: boolean;
+            issuer?: string;
+            subject?: string;
+            credentialType?: string;
+            claims?: Record<string, string>;
+            credentialId?: string;
+            revoked?: boolean;
+            error?: string;
+        };
+
+        if (!result.valid) {
+            spinner.fail(`Invalid credential: ${result.error ?? 'Unknown reason'}`);
+            return;
+        }
+
+        if (result.revoked) {
+            spinner.warn('Credential signature is valid but it has been REVOKED');
+        } else {
+            spinner.succeed('Credential verified successfully');
+        }
+
+        console.log(`\n  Type:     ${result.credentialType}`);
+        console.log(`  Issuer:   ${result.issuer}`);
+        console.log(`  Subject:  ${result.subject}`);
+        console.log(`  Revoked:  ${result.revoked ? 'YES' : 'No'}`);
+        console.log(`  ID:       ${result.credentialId}`);
+
+        if (result.claims && Object.keys(result.claims).length > 0) {
+            console.log('\n  Disclosed claims:');
+            for (const [key, value] of Object.entries(result.claims)) {
+                console.log(`    ${key}: ${value}`);
+            }
+        } else {
+            console.log('\n  No claims disclosed (minimal presentation)');
+        }
+    } catch (error) {
+        spinner.fail(`Failed to verify credential: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
 async function changeUniversityCommand(): Promise<void> {
     try {
         // Get university private key
@@ -673,10 +837,12 @@ async function mainMenu(): Promise<void> {
                 choices = [
                     'Register a university',
                     'Register a student',
-                    "Get student's personal details",
-                    "Get student's personal details and academic results",
+                    "Get student's on-chain identity (DID hash)",
+                    "Get student's academic results",
                     'Enroll a student',
                     'Record student evaluation',
+                    'Issue Academic Result VC',
+                    'Verify Credential (SD-JWT)',
                     'Request permission from a student',
                     'Verify permission for a student',
                     'Change current university',
@@ -686,6 +852,7 @@ async function mainMenu(): Promise<void> {
                 // Limited menu when no university wallet is configured
                 choices = [
                     'Register a university',
+                    'Verify Credential (SD-JWT)',
                     'Exit'
                 ];
             }
@@ -707,10 +874,10 @@ async function mainMenu(): Promise<void> {
                 case 'Register a student':
                     await registerStudentCommand();
                     break;
-                case "Get student's personal details":
+                case "Get student's on-chain identity (DID hash)":
                     await getStudentInfoCommand();
                     break;
-                case "Get student's personal details and academic results":
+                case "Get student's academic results":
                     await getStudentResultsCommand();
                     break;
                 case 'Enroll a student':
@@ -718,6 +885,12 @@ async function mainMenu(): Promise<void> {
                     break;
                 case 'Record student evaluation':
                     await evaluateStudentCommand();
+                    break;
+                case 'Issue Academic Result VC':
+                    await issueAcademicResultVcCommand();
+                    break;
+                case 'Verify Credential (SD-JWT)':
+                    await verifyVcCommand();
                     break;
                 case 'Request permission from a student':
                     await requestPermissionCommand();

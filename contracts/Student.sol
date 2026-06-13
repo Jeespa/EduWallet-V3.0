@@ -12,8 +12,11 @@ error PermissionAlreadyGiven();
 
 /**
  * @title Student Smart Contract
- * @author Diego Da Giau
- * @notice Manages a student's academic records and university permissions
+ * @author Diego Da Giau, extended for EduWallet V3.0
+ * @notice Manages a student's academic records and university permissions.
+ *         Personal data (name, birthDate, etc.) has been removed from on-chain
+ *         storage and is now held exclusively in Verifiable Credentials (SD-JWTs)
+ *         stored in the student's mobile wallet.
  * @dev Implements role-based access control for universities to manage student records
  */
 contract Student is SmartAccount, AccessControlEnumerable {
@@ -76,81 +79,46 @@ contract Student is SmartAccount, AccessControlEnumerable {
     }
 
     /**
-     * @dev Structure containing student's basic personal information
-     * @param name Student's first name
-     * @param surname Student's last name
-     * @param birthDate Unix timestamp of student's birth date
-     * @param birthPlace Student's place of birth
-     * @param country Student's country of birth
+     * @notice keccak256 hash of the student's did:key identifier.
+     *         Used for off-chain DID lookups without storing the full DID string.
      */
-    struct StudentBasicInfo {
-        string name;
-        string surname;
-        uint birthDate;
-        string birthPlace;
-        string country;
-    }
+    bytes32 public didKeyHash;
+
+    // On-chain academic record — no personal data
+    Result[] private _results;
 
     /**
-     * @dev Structure containing complete student information
-     * @param basicInfo Student's personal information
-     * @param results Array of all academic results
-     */
-    struct StudentInfo {
-        StudentBasicInfo basicInfo;
-        Result[] results;
-    }
-
-    // Student's information
-    StudentInfo private studentInfo;
-
-    /**
-     * @notice Creates a new Student contract with initial data
-     * @dev Initializes student information and grants initial roles
+     * @notice Creates a new Student contract
+     * @dev Grants initial roles and records the DID hash for identity binding
      * @param _university Initial university address to receive WRITER_ROLE
-     * @param _student Student's address to receive DEFAULT_ADMIN_ROLE
-     * @param _basicInfo Struct containing core biographical student's info
-     * @param _entryPoint EntryPoint contract address used by the account abstraction layer
+     * @param _student Student's EOA address (owner)
+     * @param _didKeyHash keccak256 of the student's did:key string
+     * @param _entryPoint EntryPoint contract address for account abstraction
      */
     constructor(
         address _university,
         address _student,
-        StudentBasicInfo memory _basicInfo,
+        bytes32 _didKeyHash,
         IEntryPoint _entryPoint
     ) SmartAccount(_entryPoint, _student) {
-        studentInfo.basicInfo = _basicInfo;
-
-        // Set the student as admin of the wallet
+        didKeyHash = _didKeyHash;
         _grantRole(DEFAULT_ADMIN_ROLE, address(this));
-        // Give to the university the permissions to write
         _grantRole(WRITER_ROLE, _university);
     }
 
     /**
-     * @notice Gets complete student information including academic records
-     * @dev Only accessible by addresses with DEFAULT_ADMIN_ROLE
-     * @return Complete student information structure
+     * @notice Returns all academic results for the student.
+     * @dev Only accessible by the student (DEFAULT_ADMIN_ROLE via executeViewCall).
+     *      Personal data is no longer stored on-chain — see the student's KYC VC.
+     * @return Array of all academic results
      */
     function getStudentInfo()
         external
         view
         onlyRole(DEFAULT_ADMIN_ROLE)
-        returns (StudentInfo memory)
+        returns (Result[] memory)
     {
-        return studentInfo;
-    }
-
-    /**
-     * @notice Gets student's basic information without academic records
-     * @dev Accessible by anyone (public information)
-     * @return Basic student information structure
-     */
-    function getStudentBasicInfo()
-        external
-        view
-        returns (StudentBasicInfo memory)
-    {
-        return studentInfo.basicInfo;
+        return _results;
     }
 
     /**
@@ -159,63 +127,56 @@ contract Student is SmartAccount, AccessControlEnumerable {
      * @return Array of academic results
      */
     function getResults() external view returns (Result[] memory) {
-        // Access control
         require(
             hasRole(READER_ROLE, _msgSender()) ||
                 hasRole(WRITER_ROLE, _msgSender()),
             AccessControlUnauthorizedAccount(_msgSender(), READER_ROLE)
         );
-
-        return studentInfo.results;
+        return _results;
     }
 
     /**
      * @notice Enrolls a student in one or more courses
-     * @dev Only callable by universities with WRITER_ROLE. Creates new Result records with empty grade fields.
+     * @dev Only callable by universities with WRITER_ROLE.
      * @param _enrollments Array of enrollment information for each course
      */
     function enroll(
         EnrollmentInfo[] calldata _enrollments
     ) external onlyRole(WRITER_ROLE) {
         for (uint i = 0; i < _enrollments.length; ++i) {
-            // Create a new Result record for each enrollment with empty evaluation fields
             Result memory r = Result(
                 _enrollments[i].code,
                 _enrollments[i].name,
                 _msgSender(),
                 _enrollments[i].degreeCourse,
                 _enrollments[i].ects,
-                "", // Empty grade (not evaluated yet)
-                0, // No evaluation date
-                "" // No certificate hash
+                "",
+                0,
+                ""
             );
-            studentInfo.results.push(r);
+            _results.push(r);
         }
     }
 
     /**
      * @notice Updates course records with evaluation results (grades and certificates)
-     * @dev Only callable by universities with WRITER_ROLE. Updates existing Result records with evaluation data.
+     * @dev Only callable by universities with WRITER_ROLE.
      * @param _evaluations Array of evaluation information for completed courses
      */
     function evaluate(
         EvaluationInfo[] calldata _evaluations
     ) external onlyRole(WRITER_ROLE) {
         for (uint i = 0; i < _evaluations.length; ++i) {
-            // Find the right course to evaluate by matching code and university
-            for (uint j; j < studentInfo.results.length; ++j) {
-                // Different universities may use the same course code, so check both code and university address
+            for (uint j; j < _results.length; ++j) {
                 if (
-                    keccak256(bytes(studentInfo.results[j].code)) ==
-                    keccak256(bytes(_evaluations[j].code)) &&
-                    studentInfo.results[j].university == _msgSender()
+                    keccak256(bytes(_results[j].code)) ==
+                    keccak256(bytes(_evaluations[i].code)) &&
+                    _results[j].university == _msgSender()
                 ) {
-                    // Update the result record with evaluation data
-                    studentInfo.results[j].grade = _evaluations[i].grade;
-                    studentInfo.results[j].date = _evaluations[i].date;
-                    studentInfo.results[j].certificateHash = _evaluations[i]
-                        .certificateHash;
-                    continue;
+                    _results[j].grade = _evaluations[i].grade;
+                    _results[j].date = _evaluations[i].date;
+                    _results[j].certificateHash = _evaluations[i].certificateHash;
+                    break;
                 }
             }
         }

@@ -1,176 +1,133 @@
-# EduWallet Mobile App
+# EduWallet Mobile
 
-React Native / Expo application that provides a mobile student
-interface to EduWallet. The app talks to the **EduWallet gateway**
-instead of the blockchain directly and reuses the shared TypeScript
-types and HTTP client.
+Expo / React Native student wallet. Lets students create a self-sovereign identity, complete BankID identity verification, receive and store Verifiable Credentials, and share selective disclosures with verifiers.
 
-> **Platform note**  
-> The app is built with Expo and React Native and is therefore
-> platform-agnostic. It has been **developed and tested on Android**.  
-> In principle, the same code can run on iOS (via Expo Go or a standalone
-> build) as long as the gateway URL is reachable from the device.  
-> This thesis only documents and evaluates the Android setup.
+Originally scaffolded by Jesper Rauan Goksør. Most screens and all SSI flows have since been replaced.
+
+> Built with Expo / React Native. Developed and tested on Android. iOS is supported in principle via Expo Go or a standalone build but has not been validated.
 
 ---
 
-## ✨ Features
+## Setup
 
-- Login using **ID + password** via the gateway (`POST /auth/login`).
-- Wallet view that shows:
-  - student name and basic profile
-  - total ECTS balance
-  - list of courses with grade, ECTS, degree programme and university
-  - links to course certificates (IPFS / HTTP URLs)
-- Course details screen with evaluation date and full university info.
-- Permissions screen that lets the student:
-  - review per-university read/write permissions
-  - see pending requests
-  - accept read/write requests
-  - revoke existing permissions
-- Profile screen with personal details and smart account address.
-- Shared state via a `StudentContext` so all screens see the same
-  logged-in student.
+**Prerequisites:**
+- Node.js 20 LTS
+- Android Studio (for emulator) or a physical device
 
----
+```bash
+cd eduwallet-mobile
+npm install
+cp .env.example .env  # set EXPO_PUBLIC_GATEWAY_BASE_URL
+npx expo start
+```
 
-## 📁 Structure
+In the Expo CLI: press `a` for Android emulator, `i` for iOS simulator, or scan the QR code with Expo Go.
 
-    eduwallet-mobile/
-    ├── app/
-    │   ├── _layout.tsx         # Root layout with StudentProvider + Stack
-    │   ├── (tabs)/             # Tabbed main UI (wallet + permissions)
-    │   │   ├── _layout.tsx     # Tab bar configuration
-    │   │   ├── index.tsx       # Home / wallet screen
-    │   │   └── permissions.tsx # Permissions screen
-    │   ├── course/
-    │   │   ├── _layout.tsx     # Course stack
-    │   │   └── [index].tsx     # Course details screen
-    │   └── profile.tsx         # Profile screen
-    ├── context/
-    │   └── StudentContext.tsx  # StudentProvider + useStudent hook
-    ├── lib/
-    │   └── api.ts              # Gateway HTTP wrapper (uses shared/clientApi.ts)
-    └── types/
-        └── index.ts            # Re-exports shared/apiTypes.ts for the app
+### Gateway URL
 
-The app uses **Expo Router** for navigation and a dedicated
-`StudentContext` to store:
+| Target | `EXPO_PUBLIC_GATEWAY_BASE_URL` |
+|--------|-------------------------------|
+| Android emulator | `http://10.0.2.2:3000` |
+| iOS simulator | `http://127.0.0.1:3000` |
+| Physical device | `http://<your-LAN-ip>:3000` |
 
-- `id` – student ID  
-- `sca` – student smart account address  
-- `data` – full `CredentialsResponse` from the gateway  
+`localhost` on the emulator/device refers to the device itself, not the development machine.
 
 ---
 
-## 🔗 Gateway integration
+## Screens
 
-All HTTP calls go through `app/lib/api.ts`, which in turn uses the
-shared HTTP client:
+### Create Wallet
 
-- `shared/clientApi.ts` – common HTTP client used by both frontends  
-- `shared/apiTypes.ts` – shared TypeScript types for all payloads  
+Generates a secp256k1 keypair using `ethers.Wallet.createRandom()`. Derives the student's `did:key` identifier from the compressed public key (secp256k1 multicodec prefix + base58btc encoding). Stores the private key in Expo SecureStore (hardware-backed on supported devices). Shows the DID to the student.
 
-The base URL is configured via an Expo env variable:
+On subsequent launches the wallet is restored from storage and the app proceeds directly past this screen.
 
-    // app/lib/api.ts
-    export const API_BASE_URL =
-      process.env.EXPO_PUBLIC_GATEWAY_BASE_URL ?? "http://localhost:3000";
+### KYC
 
-> **Important**  
-> When running the app on a **device** or emulator, `localhost`
-> refers to the device itself, not your development machine.  
-> You usually need to override this with a LAN/emulator URL.
+Opens the Signicat BankID authorisation URL in an in-app browser (`expo-web-browser`). After the student completes BankID, the gateway issues a KYC SD-JWT and returns it via deep link (`eduwalletmobile://kyc-complete?vc=...`). The credential is stored in Expo SecureStore.
 
-Examples:
+### Credentials
 
-- Android emulator (tested): `http://10.0.2.2:3000`  
-- iOS simulator (in principle): `http://127.0.0.1:3000`  
-- Physical device (Android or iOS): `http://<your-laptop-LAN-ip>:3000`  
+Lists all stored Verifiable Credentials. Tapping a credential shows its decoded claims (selectively disclosed fields).
 
-Create a `.env` file in `eduwallet-mobile/`:
+### Student Status
 
-    EXPO_PUBLIC_GATEWAY_BASE_URL=http://10.0.2.2:3000
+Submits the KYC VC to the gateway to activate the student's on-chain account (deploys the SCA counterfactually if it does not yet exist) and receive a StudentStatus VC.
 
-and restart Expo so the new value is picked up.
+### Academic Results
 
----
+Fetches and displays academic result VCs issued by the university via `GET /vc/academic-results/:studentDid`.
 
-## ✅ Prerequisites
+### Share VC
 
-- Node.js (LTS)
-- `npm` or `yarn`
-- Expo tooling (`npx expo` is fine)
-- A running **EduWallet gateway** (see `gateway/README.md`)
-- Contracts deployed and test data set up via the CLI
+Constructs a selective disclosure presentation from stored credentials. The student chooses which claims to disclose. The resulting SD-JWT presentation string can be shown as a QR code or copied to clipboard.
+
+### Request Status
+
+Calls `GET /vc/status/:credentialId` to check whether a credential has been revoked.
+
+### Permissions
+
+Shows granted university permissions. Builds a UserOperation for `grantPermission` or `revokePermission`, signs it with EIP-712 typed-data signing using the device key, and sends the signed UserOperation to the gateway for submission.
 
 ---
 
-## 🚀 Running the app
+## Key Design Decisions
 
-From the repository root:
+**Private key never enters React state.** The private key is written to `expo-secure-store` and read back only when signing. The wallet context holds only the DID and owner address (non-sensitive).
 
-    cd eduwallet-mobile
+**Authentication.** Every authenticated gateway request uses the challenge-response protocol: fetch a nonce from `GET /auth/challenge`, sign it with `eth_sign` (personal sign), submit to `POST /auth/login`. No passwords.
 
-    # install dependencies
-    npm install   # or: yarn
+**Deep link handling.** The app registers the `eduwalletmobile://` scheme. The KYC callback uses `eduwalletmobile://kyc-complete?vc=<sd-jwt>` to return the credential after the BankID redirect chain.
 
-    # (optional) configure API base URL in .env
-    # EXPO_PUBLIC_GATEWAY_BASE_URL=http://10.0.2.2:3000
-
-    # start Expo
-    npx expo start
-    # or: npm run start (depending on package.json)
-
-Then, using the Expo CLI:
-
-- press `a` to open the **Android emulator** (this is the tested path),  
-- or `i` to open the **iOS simulator** (in principle supported, not tested),  
-- or scan the QR code with the Expo Go app on a physical device (Android or iOS),
-  making sure the device can reach the gateway URL over the network.
-
-Once the app and gateway are running, you can:
-
-1. Log in with a test student ID/password set up via the CLI.  
-2. Browse the wallet (total ECTS + course list).  
-3. Tap a course to open the course details screen.  
-4. Open the **Permissions** tab to view and manage university permissions.  
-5. Open the **Profile** screen for personal details and the smart account.  
+**Standalone DID derivation.** Base58btc encoding is implemented inline without external dependencies so it runs in Hermes (the default React Native JS engine) without polyfills.
 
 ---
 
-## 🧱 State management
+## Source Structure
 
-The `StudentProvider` in `context/StudentContext.tsx` wraps the
-entire navigation tree. It provides:
-
-- `id`, `sca`, `data` – current student info  
-- `setStudent(id, sca, data)` – called after successful login  
-- `clearStudent()` – called on logout  
-
-Screens use the `useStudent()` hook to access this state.
-
----
-
-## 📸 Screenshots
-
-The `figures/` folder contains static screenshots of the app used in
-the thesis:
-
-- `Login.jpg`, `Login Filled.jpg`  
-- `Wallet.jpg`  
-- `Course Graded.jpg`, `Course Ungraded.jpg`  
-- `Permissions 1.jpg`, `Permissions 2.jpg`  
-- `Profile.jpg`  
-
-They are not required for running the app, but are useful in
-documentation and the thesis.
+```
+app/
+├── _layout.tsx                 Root layout: WalletProvider + redirect guard
+├── create-wallet.tsx           Wallet creation onboarding
+├── kyc.tsx                     BankID KYC flow
+├── credentials.tsx             Credential list
+├── student-status.tsx          SCA activation + StudentStatus VC
+├── academic-results.tsx        Academic result VCs
+├── share-vc.tsx                Selective disclosure presentation
+├── request-status.tsx          Credential revocation check
+└── permissions.tsx             University permission management
+context/
+├── WalletContext.tsx            DID + keypair state
+└── CredentialsContext.tsx       Stored VC state
+lib/
+├── did.ts                      deriveDidKey() (standalone, no Node deps)
+└── api.ts                      HTTP wrapper for the gateway
+```
 
 ---
 
-## 🔗 Related components
+## Deep Link Registration
 
-- `gateway/` – the HTTP gateway that this app talks to  
-- `browser-extension/` – alternative student client in the browser  
-- `shared/` – shared types and HTTP client (`apiTypes.ts`,
-  `clientApi.ts`) reused across all frontends.
+`app.json`:
+```json
+{
+  "expo": {
+    "scheme": "eduwalletmobile"
+  }
+}
+```
+
+The `eduwalletmobile://kyc-complete` deep link is triggered by the gateway's `/kyc/callback` after BankID authentication completes.
+
+---
+
+## Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `ethers` | Keypair generation, signing, ABI encoding |
+| `expo-secure-store` | Hardware-backed private key storage |
+| `expo-web-browser` | In-app browser for BankID OIDC |
+| `@react-native-async-storage/async-storage` | Persistent DID and address storage |

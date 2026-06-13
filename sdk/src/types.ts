@@ -24,25 +24,23 @@ export interface StudentCredentials extends Omit<StudentEthWalletInfo, "ethWalle
 }
 
 /**
- * Student's biographical information.
- * Contains the core information to describe a student.
+ * Student on-chain identity data (EduWallet V3.0).
+ *
+ * Personal data (name, birthDate, etc.) has been removed from on-chain storage
+ * and is now held exclusively in the student's KYC SD-JWT Verifiable Credential.
+ * Only the DID hash remains on-chain for identity binding.
  */
 export interface StudentData {
-    /** Student's first name. */
-    readonly name: string;
-    /** Student's last name. */
-    readonly surname: string;
-    /** Student's date of birth in ISO format (YYYY-MM-DD). */
-    readonly birthDate: string;
-    /** Student's place of birth. */
-    readonly birthPlace: string;
-    /** Student's country of origin. */
-    readonly country: string;
+    /**
+     * keccak256 of the student's did:key string.
+     * Stored on-chain so the Student contract is linked to the SSI identity
+     * without exposing the full DID or any personal data.
+     */
+    readonly didKeyHash: string;
 }
 
 /**
- * Student information.
- * Contains the student's biographical information and academic records.
+ * Student information including academic records.
  */
 export interface Student extends StudentData {
     /** Collection of all academic results earned by the student. */

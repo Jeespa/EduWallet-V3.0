@@ -1,11 +1,12 @@
-import type { Wallet } from "ethers";
+import { ethers, type Wallet } from "ethers";
 import type { CourseInfo, Evaluation, Student, StudentCredentials, StudentData } from "./types";
+import type { Student as StudentContract } from '@typechain/contracts/Student';
 import { PermissionType } from "./types";
 import { computeDate, createStudentWallet, executeSmartAccountViewCall, generateStudent, getStudentContract, getStudentsRegister, getUniversityAccountAddress, publishCertificate, sendTransaction } from "./utils";
 import { blockchainConfig, DEBUG, logError, provider, roleCodes } from "./conf";
+import { deriveDidKey } from "./did";
 import dayjs from "dayjs";
 import utc from 'dayjs/plugin/utc.js';
-import type { Student as StudentContract } from '@typechain/contracts/Student';
 
 /**
  * Re-export types for SDK consumers
@@ -13,59 +14,45 @@ import type { Student as StudentContract } from '@typechain/contracts/Student';
 export type { StudentCredentials, StudentData, CourseInfo, Evaluation, Student}
 export { PermissionType };
 
+// DID utilities
+export { deriveDidKey } from "./did";
+
 // Configure dayjs to use UTC for consistent date handling across timezones
 dayjs.extend(utc);
 
 /**
  * Registers a new student in the academic blockchain system.
- * Creates both a student EOA and smart account.
- * @author Diego Da Giau
+ *
+ * EduWallet V3.0: personal data is no longer stored on-chain. The student's
+ * did:key identifier is derived from their newly-created EOA key and its
+ * keccak256 hash is stored on-chain as the identity binding.
+ *
  * @param {Wallet} universityWallet - The university wallet with registration permissions
- * @param {StudentData} student - The student information to register
  * @returns {Promise<StudentCredentials>} The created student credentials and wallet information
- * @throws {Error} If university wallet is missing, student data is incomplete, or registration fails
+ * @throws {Error} If university wallet is missing or registration fails
  */
-export async function registerStudent(universityWallet: Wallet, student: StudentData): Promise<StudentCredentials> {
+export async function registerStudent(universityWallet: Wallet): Promise<StudentCredentials> {
     try {
-        // Validate input parameters
         if (!universityWallet) {
             throw new Error('University wallet is required');
         }
 
-        if (!student) {
-            throw new Error('Student data is required');
-        }
-
-        if (!student.name || !student.surname || !student.birthDate || !student.birthPlace || !student.country) {
-            throw new Error('Student data is incomplete - all fields are required');
-        }
-
-        if (new Date(student.birthDate) <= new Date('1970-01-01')) {
-            throw new Error('Student birthdate is incompatible - the date must be after 1970-01-01')
-        }
-
-        // Get contract instance
         const studentsRegister = getStudentsRegister();
 
         // Create a new Ethereum wallet for the student
         const studentEthWallet = createStudentWallet();
 
-        // Format student data for the contract
-        const basicInfo: StudentContract.StudentBasicInfoStruct = {
-            name: student.name,
-            surname: student.surname,
-            birthDate: dayjs.utc(student.birthDate).unix(),
-            birthPlace: student.birthPlace,
-            country: student.country
-        }
+        // Derive did:key from the EOA's secp256k1 public key, then hash it
+        const compressedPubKey = new ethers.SigningKey(studentEthWallet.ethWallet.privateKey).compressedPublicKey;
+        const did = deriveDidKey(compressedPubKey);
+        const didKeyHash = ethers.keccak256(ethers.toUtf8Bytes(did));
 
         const connectedStudent = studentEthWallet.ethWallet.connect(provider);
 
-        await sendTransaction(universityWallet, studentsRegister, blockchainConfig.registerAddress, 'registerStudent', [connectedStudent.address, basicInfo]);
+        await sendTransaction(universityWallet, studentsRegister, blockchainConfig.registerAddress, 'registerStudent', [connectedStudent.address, didKeyHash]);
 
         const studentAccountAddress = await studentsRegister.connect(connectedStudent).getStudentAccount();
 
-        // Return complete student credentials
         return {
             id: studentEthWallet.id,
             password: studentEthWallet.password,
@@ -208,55 +195,30 @@ export async function evaluateStudent(universityWallet: Wallet, studentWalletAdd
 }
 
 /**
- * Retrieves basic student information from the blockchain.
- * Only fetches personal data without academic results.
- * @author Diego Da Giau
- * @param {Wallet} universityWallet - The university wallet
+ * Retrieves student on-chain identity data.
+ *
+ * EduWallet V3.0: personal data is no longer on-chain. This function returns
+ * the student's `didKeyHash` from the public contract getter.
+ * Use `getStudentWithResult` to also include academic results.
+ *
+ * @param {Wallet} universityWallet - The university wallet (unused for public getter, kept for API consistency)
  * @param {string} studentWalletAddress - The student's academic wallet address
- * @returns {Promise<Student>} The student's basic information
- * @throws {Error} If university wallet is missing, student address is invalid, or data retrieval fails
+ * @returns {Promise<Student>} The student's on-chain identity data
  */
-export async function getStudentInfo(universityWallet: Wallet, studentWalletAddress: string): Promise<Student> {
+export async function getStudentInfo(_universityWallet: Wallet, studentWalletAddress: string): Promise<Student> {
     try {
-        // Input validation
-        if (!universityWallet) {
-            throw new Error('University wallet is required');
-        }
-
         if (!studentWalletAddress || !studentWalletAddress.startsWith('0x')) {
             throw new Error('Valid student wallet address is required');
         }
 
-        // Get student contract instance
-        const studentWallet = getStudentContract(studentWalletAddress);
-
-        // Fetch student's basic information
-        const student = await studentWallet.getStudentBasicInfo();
+        const studentContract = getStudentContract(studentWalletAddress);
+        const didKeyHash: string = await (studentContract as any).didKeyHash();
 
         if (DEBUG) {
-            console.log('Student: ', student);
+            console.log('Student didKeyHash:', didKeyHash);
         }
 
-        // Validate retrieved data
-        if (
-            !student ||
-            !student.name ||
-            !student.surname ||
-            student.birthDate === undefined ||
-            !student.birthPlace ||
-            !student.country
-        ) {
-            throw new Error('Received invalid or empty student data');
-        }
-
-        // Format and return student data
-        return {
-            name: student.name,
-            surname: student.surname,
-            birthDate: computeDate(student.birthDate),
-            birthPlace: student.birthPlace,
-            country: student.country,
-        };
+        return { didKeyHash };
     } catch (error) {
         logError('Failed to retrieve student information:', error);
         throw new Error('Failed to retrieve student information');
@@ -265,42 +227,32 @@ export async function getStudentInfo(universityWallet: Wallet, studentWalletAddr
 
 /**
  * Retrieves student information including academic results.
- * Provides a complete academic profile with course outcomes.
- * @author Diego Da Giau
- * @param {Wallet} universityWallet - The university wallet with read permissions
+ *
+ * Fetches both the on-chain `didKeyHash` and the full list of academic results
+ * the university has permission to see.
+ *
+ * @param {Wallet} universityWallet - The university wallet with READER or WRITER role
  * @param {string} studentWalletAddress - The student's academic wallet address
- * @returns {Promise<Student>} The student's complete information with academic results
+ * @returns {Promise<Student>} Student with didKeyHash and academic results
  * @throws {Error} If university wallet is missing, student address is invalid, or data retrieval fails
  */
 export async function getStudentWithResult(universityWallet: Wallet, studentWalletAddress: string): Promise<Student> {
     try {
-        // Input validation
         if (!universityWallet) {
             throw new Error('University wallet is required');
         }
-
         if (!studentWalletAddress || !studentWalletAddress.startsWith('0x')) {
             throw new Error('Valid student wallet address is required');
         }
 
-        // Get student contract instance
         const studentAccount = getStudentContract(studentWalletAddress);
-
-        // Connect university wallet to provider
         const connectedUniversity = universityWallet.connect(provider);
 
-        // Fetch student data and results in parallel for efficiency
         const [student, results] = await Promise.all([
             getStudentInfo(universityWallet, studentWalletAddress),
             executeSmartAccountViewCall(connectedUniversity, studentAccount, studentWalletAddress, 'getResults', []),
         ]);
 
-        // Validate retrieved data
-        if (!student) {
-            throw new Error('Received invalid or empty student data');
-        }
-
-        // Generate complete student object with processed results
         return await generateStudent(student, results[0]);
     } catch (error) {
         logError('Failed to retrieve complete student information:', error);

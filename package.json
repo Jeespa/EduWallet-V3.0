@@ -13,7 +13,10 @@
     "deps:gateway": "cd gateway && npm install",
     "deps:mobile": "cd eduwallet-mobile && npm install",
     "deps:all": "npm run deps:sdk && npm run deps:cli && npm run deps:ext && npm run deps:gateway && npm run deps:mobile",
-    "build": "npx hardhat compile &&npm run build-sdk && npm run build-cli && cd browser-extension && npm run build && cd ../gateway && npm run build && cd .."
+    "build": "npx hardhat compile &&npm run build-sdk && npm run build-cli && cd browser-extension && npm run build && cd ../gateway && npm run build && cd ..",
+    "bench:gas": "REPORT_GAS=true npx hardhat test test/gas-benchmarks.ts",
+    "bench:sdjwt": "cd gateway && npm run bench:sdjwt",
+    "bench:e2e": "cd gateway && npm run bench:e2e"
   },
   "repository": {
     "type": "git",

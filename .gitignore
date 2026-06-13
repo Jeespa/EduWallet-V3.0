@@ -2,7 +2,7 @@ node_modules
 cache
 artifacts
 typechain-types
-/.env
+.env
 filebase_demo
 .vscode
 notes.md

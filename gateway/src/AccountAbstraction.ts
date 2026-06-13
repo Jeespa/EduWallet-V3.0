@@ -40,7 +40,7 @@ const DOMAIN_VERSION = "1";
  * @param chainId - Current chain identifier
  * @returns Typed data domain structure for ethers.js
  */
-function getErc4337TypedDataDomain(
+export function getErc4337TypedDataDomain(
   entryPoint: string,
   chainId: number
 ): ethers.TypedDataDomain {
@@ -57,7 +57,7 @@ function getErc4337TypedDataDomain(
  *
  * @returns Mapping from type name to list of typed fields
  */
-function getErc4337TypedDataTypes(): {
+export function getErc4337TypedDataTypes(): {
   [type: string]: ethers.TypedDataField[];
 } {
   return {
@@ -72,6 +72,23 @@ function getErc4337TypedDataTypes(): {
       { name: "paymasterAndData", type: "bytes" },
     ],
   };
+}
+
+/**
+ * JSON-serializable form of a packed UserOperation.
+ * bigint fields (nonce, preVerificationGas) are expressed as 0x-prefixed hex strings
+ * so they survive JSON.stringify/parse on any platform including mobile.
+ */
+export interface PackedUserOpJson {
+  sender: string;
+  nonce: string;
+  initCode: string;
+  callData: string;
+  accountGasLimits: string;
+  preVerificationGas: string;
+  gasFees: string;
+  paymasterAndData: string;
+  signature?: string;
 }
 
 /**
@@ -147,7 +164,7 @@ interface PackedUserOperation {
 export class AccountAbstraction {
   private provider: ethers.Provider;
   private entryPoint: ethers.Contract;
-  private signer: ethers.Wallet;
+  private signer: ethers.Signer;
 
   /**
    * Creates a new account abstraction helper.
@@ -155,7 +172,7 @@ export class AccountAbstraction {
    * @param provider - JSON-RPC provider used to query fees and send transactions
    * @param signer - Wallet that signs user operations and pays for handleOps
    */
-  constructor(provider: ethers.Provider, signer: ethers.Wallet) {
+  constructor(provider: ethers.Provider, signer: ethers.Signer) {
     this.provider = provider;
     this.signer = signer;
     this.entryPoint = new ethers.Contract(
@@ -310,6 +327,82 @@ export class AccountAbstraction {
       logError("Error sending batch user operations:", error);
       throw error;
     }
+  }
+
+  /**
+   * Builds a packed UserOperation in JSON-serializable form for client-side
+   * EIP-712 signing. bigint fields are hex-encoded as strings.
+   *
+   * The returned object should be sent to the client, which signs it with
+   * `wallet.signTypedData(domain, types, packedUserOp)` and sends the
+   * signature back alongside the packed op.
+   */
+  async buildForClientSigning({
+    sender,
+    target,
+    value,
+    data,
+    initCode = "0x",
+  }: {
+    sender: string;
+    target: string;
+    value: bigint;
+    data: string;
+    initCode?: string;
+  }): Promise<PackedUserOpJson> {
+    const userOp = await this.createUserOp({ sender, target, value, data, initCode });
+    const packed = this.packUserOp(userOp);
+    return {
+      sender: packed.sender,
+      nonce: ethers.toBeHex(packed.nonce),
+      initCode: packed.initCode,
+      callData: packed.callData,
+      accountGasLimits: packed.accountGasLimits,
+      preVerificationGas: ethers.toBeHex(packed.preVerificationGas),
+      gasFees: packed.gasFees,
+      paymasterAndData: packed.paymasterAndData,
+    };
+  }
+
+  /**
+   * Returns the EIP-712 domain and types needed by the client to sign a
+   * packed UserOperation. Pass these alongside `buildForClientSigning` output.
+   */
+  getEip712Params(): {
+    domain: ethers.TypedDataDomain;
+    types: Record<string, ethers.TypedDataField[]>;
+  } {
+    return {
+      domain: getErc4337TypedDataDomain(ENTRY_POINT_ADDRESS, CHAIN_ID),
+      types: getErc4337TypedDataTypes(),
+    };
+  }
+
+  /**
+   * Submits one or more externally-signed packed UserOperations via
+   * EntryPoint.handleOps. The gateway's own signer pays for the outer
+   * transaction; the UserOp gas is covered by the Paymaster.
+   *
+   * @param signedOps - Packed UserOperations with `signature` already set
+   * @returns Transaction response for the handleOps call
+   */
+  async submitSignedPacked(
+    signedOps: Required<PackedUserOpJson>[]
+  ): Promise<ethers.TransactionResponse> {
+    const packed = signedOps.map((op) => ({
+      sender: op.sender,
+      nonce: BigInt(op.nonce),
+      initCode: op.initCode,
+      callData: op.callData,
+      accountGasLimits: op.accountGasLimits,
+      preVerificationGas: BigInt(op.preVerificationGas),
+      gasFees: op.gasFees,
+      paymasterAndData: op.paymasterAndData,
+      signature: op.signature,
+    }));
+    const ep = this.entryPoint.connect(this.signer) as any;
+    const tx = await ep.handleOps(packed, this.signer.address);
+    return tx as ethers.TransactionResponse;
   }
 
   /**

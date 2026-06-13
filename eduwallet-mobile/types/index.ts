@@ -4,4 +4,5 @@ export type {
   PermissionStatus,
   ErrorResponse,
   AllPermissionsForStudent,
+  WalletInfo,
 } from "../../shared/apiTypes";

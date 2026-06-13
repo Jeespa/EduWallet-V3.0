@@ -154,6 +154,46 @@ export interface PermissionStatus {
   writeRequested: boolean;
 }
 
+// ---------- Auth ----------
+
+/**
+ * Response from POST /auth/login (keypair challenge-response).
+ *
+ * Contains the student's smart contract account address as derived from
+ * the scaAddress the client sent with the login request. The gateway does
+ * not look up the SCA — the client already has it in its StudentStatus VC.
+ */
+export interface StudentAuthResponse {
+  /** Student smart contract account address, or null if not provided. */
+  studentSca: string | null;
+}
+
+/**
+ * One-time challenge issued by GET /auth/challenge.
+ * The client signs `challenge` with the did:key private key and sends
+ * both back in the POST /auth/login body.
+ */
+export interface AuthChallenge {
+  challenge: string;
+  /** Unix timestamp (ms) after which the challenge is no longer valid. */
+  expiresAt: number;
+}
+
+// ---------- SSI wallet ----------
+
+/**
+ * Local identity wallet created on the student's device.
+ * Returned after wallet creation so UI can display the DID to the user.
+ *
+ * The private key itself is never included here — it lives only in SecureStore.
+ */
+export interface WalletInfo {
+  /** Student's decentralised identifier, e.g. "did:key:zQ3sh..." */
+  did: string;
+  /** EOA address derived from the same keypair (for future ERC-4337 use). */
+  ownerAddress: string;
+}
+
 // ---------- Error response ----------
 
 /**

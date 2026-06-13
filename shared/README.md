@@ -1,64 +1,63 @@
-# EduWallet Shared Library
+# Shared
 
-Small TypeScript library that contains code shared between the different
-EduWallet components:
-
-- **Shared API types** – JSON shapes for all gateway requests/responses.
-- **Gateway HTTP client** – thin fetch-based client used by both student
-  frontends (browser extension and mobile app).
-
-This keeps the browser extension, mobile app and gateway in sync and
-prevents duplicated type definitions.
+TypeScript types and HTTP client shared between the gateway and the mobile app. Consumed as an npm workspace package (`"shared": "*"`).
 
 ---
 
-## 📁 Contents
+## Contents
 
-```bash
-shared/
-├── apiTypes.ts   # TypeScript interfaces for all HTTP payloads
-└── clientApi.ts  # Thin HTTP client for talking to the gateway
+### API Types
+
+Types for all gateway request and response shapes:
+
+| Type | Description |
+|------|-------------|
+| `ChallengeResponse` | `GET /auth/challenge` response: `{ challenge, expiresAt }` |
+| `LoginRequest` | `POST /auth/login` body: `{ did, signature, challenge, scaAddress? }` |
+| `LoginResponse` | `POST /auth/login` response: `{ studentSca: string \| null }` |
+| `KycAuthorizeResponse` | `GET /kyc/authorize` response: `{ authorizationUrl }` |
+| `StudentStatusRequest` | `POST /vc/student-status` body: `{ kycVc, ownerAddress }` |
+| `StudentStatusResponse` | Response: `{ studentStatusVc, studentSca, credentialId }` |
+| `AcademicResultRequest` | `POST /vc/academic-result` body: full course record |
+| `AcademicResultResponse` | Response: `{ academicResultVc, credentialId }` |
+| `AcademicResultsResponse` | `GET /vc/academic-results/:did` response: `{ vcs: string[] }` |
+| `VerifyRequest` | `POST /vc/verify` body: `{ sdJwtPresentation }` |
+| `VerifyResponse` | Full verification result with disclosed claims |
+| `CredentialStatusResponse` | `GET /vc/status/:id` response: `{ revoked: boolean }` |
+| `RevokeRequest` | `POST /vc/revoke` body: `{ credentialId }` |
+| `GrantPermissionRequest` | `/students/:sca/permissions/grant` body |
+| `RevokePermissionRequest` | `/students/:sca/permissions/revoke` body |
+
+### SD-JWT Payload Types
+
+| Type | Description |
+|------|-------------|
+| `SdJwtPayload` | Base JWT payload: `iss`, `sub`, `iat`, `exp`, `jti`, `_sd` |
+| `KycCredentialClaims` | Selectively disclosable: `given_name`, `family_name`, `birthdate` |
+| `StudentStatusClaims` | `studentDid`, `studentSca`, `universityAddress` |
+| `AcademicResultClaims` | `studentDid`, `courseName`, `courseCode`, `grade`, `credits`, `date` |
+
+### HTTP Client
+
+Typed `fetch` wrapper for all gateway endpoints. Used by the mobile app.
+
+```typescript
+import { GatewayClient } from 'shared';
+
+const client = new GatewayClient(process.env.EXPO_PUBLIC_GATEWAY_BASE_URL);
+const { challenge } = await client.getChallenge();
 ```
 
-### `apiTypes.ts`
+---
 
-Defines the common data structures used across the system, including:
+## Usage
 
-- `UniversityInfo`
-- `CourseResult`
-- `StudentPayload`
-- `UniversityPermissionEntry`
-- `AllPermissionsForStudent`
-- `CredentialsResponse`
-- `PermissionStatus`
-- `ErrorResponse`
+```json
+{
+  "dependencies": {
+    "shared": "*"
+  }
+}
+```
 
-These types are imported by:
-
-- `gateway/src/eduwalletClient.ts`
-- `browser-extension/src/lib/api.ts`
-- `eduwallet-mobile/app/types.ts`
-
-### `clientApi.ts`
-
-Exports a `createGatewayClient(baseUrl)` function that returns a minimal
-HTTP client with typed methods:
-
-- `logIn(id, password): Promise<CredentialsResponse>`
-- `getPermissions(studentSca, id, password): Promise<AllPermissionsForStudent>`
-- `revokePermission(studentSca, id, password, universityAddress?)`
-- `grantPermission(studentSca, id, password, type, universityAddress?)`
-
-The client:
-
-- Normalises the base URL.
-- Parses JSON responses.
-- Throws a typed error when the gateway returns an `ErrorResponse`.
-
-It is reused by:
-
-- `browser-extension/src/lib/api.ts`
-- `eduwallet-mobile/app/lib/api.ts`
-
-So that both student clients share the exact same HTTP behaviour and
-TypeScript types.
+No build step needed — the package is consumed directly as TypeScript via the workspace.

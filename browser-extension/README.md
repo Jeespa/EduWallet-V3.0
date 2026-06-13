@@ -20,6 +20,8 @@
 
 This folder contains the React-based Chrome extension that serves as the student interface for the EduWallet system. The extension allows students to access and manage their academic records wallet.
 
+> **Note:** The extension was written against an earlier API and has not been updated. It likely does not work with the current system, which uses SD-JWT credentials, did:key identities, and challenge-response authentication instead of passwords.
+
 ## 📁Structure
 
 ```bash
